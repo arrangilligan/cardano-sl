@@ -53,13 +53,14 @@ import           Pos.Recovery.Info (recoveryInProgress)
 import           Pos.Reporting.MemState (HasMisbehaviorMetrics (..), MisbehaviorMetrics (..))
 import           Pos.Reporting.Methods (reportMisbehaviour)
 import           Pos.StateLock (Priority (..), modifyStateLock)
-import           Pos.Util (buildListBounds, multilineBounds, _neLast)
+import           Pos.Util (buildListBounds, multilineBounds, tempMeasure, _neLast)
 import           Pos.Util.AssertMode (inAssertMode)
 import           Pos.Util.Chrono (NE, NewestFirst (..), OldestFirst (..), _NewestFirst,
                                   _OldestFirst)
 import           Pos.Util.JsonLog (jlAdoptedBlock)
 import           Pos.Util.TimeWarp (CanJsonLog (..))
 import           Pos.Util.Util (lensOf)
+
 
 ----------------------------------------------------------------------------
 -- Exceptions
@@ -246,10 +247,13 @@ handleBlocks nodeId blocks diffusion = do
     handleBlocksWithLca lcaHash = do
         logDebug $ sformat ("Handling block w/ LCA, which is "%shortHashF) lcaHash
         -- Head blund in result is the youngest one.
-        toRollback <- DB.loadBlundsFromTipWhile $ \blk -> headerHash blk /= lcaHash
+        toRollback <-
+            tempMeasure "handleBlocks.loadBlundsFromTipWhile" $
+            DB.loadBlundsFromTipWhile $ \blk -> headerHash blk /= lcaHash
         maybe (applyWithoutRollback diffusion blocks)
               (applyWithRollback nodeId diffusion blocks lcaHash)
               (_NewestFirst nonEmpty toRollback)
+
 
 applyWithoutRollback
     :: forall ctx m.
@@ -258,9 +262,11 @@ applyWithoutRollback
     -> OldestFirst NE Block
     -> m ()
 applyWithoutRollback diffusion blocks = do
+  tempMeasure "handleBlocks.applyWithoutRollback" $ do
     logInfo . sformat ("Trying to apply blocks w/o rollback. " % multilineBounds 6)
        . getOldestFirst . map (view blockHeader) $ blocks
-    modifyStateLock HighPriority "applyWithoutRollback" applyWithoutRollbackDo >>= \case
+    applyRes <- modifyStateLock HighPriority "applyWithoutRollback" applyWithoutRollbackDo
+    tempMeasure "handleBlocks.afterApply" $ case applyRes of
         Left (pretty -> err) ->
             onFailedVerifyBlocks (getOldestFirst blocks) err
         Right newTip -> do
@@ -286,7 +292,9 @@ applyWithoutRollback diffusion blocks = do
         :: HeaderHash -> m (HeaderHash, Either ApplyBlocksException HeaderHash)
     applyWithoutRollbackDo curTip = do
         logInfo "Verifying and applying blocks..."
-        res <- verifyAndApplyBlocks False blocks
+        res <-
+            tempMeasure "handleBlocks.verifyAndApplyBlocks" $
+            verifyAndApplyBlocks False blocks
         logInfo "Verifying and applying blocks done"
         let newTip = either (const curTip) identity res
         pure (newTip, res)
@@ -300,6 +308,7 @@ applyWithRollback
     -> NewestFirst NE Blund
     -> m ()
 applyWithRollback nodeId diffusion toApply lca toRollback = do
+  tempMeasure "handleBlocks.applyWithRollback" $ do
     logInfo . sformat ("Trying to apply blocks w/o rollback. " % multilineBounds 6)
        . getOldestFirst . map (view blockHeader) $ toApply
     logInfo $ sformat ("Blocks to rollback "%listJson) toRollbackHashes

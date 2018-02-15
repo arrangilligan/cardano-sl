@@ -35,7 +35,7 @@ import           Pos.Diffusion.Types (Diffusion)
 import qualified Pos.Diffusion.Types as Diffusion (Diffusion (getBlocks))
 import           Pos.Reporting (reportOrLogE, reportOrLogW)
 import           Pos.Util.Chrono (NE, OldestFirst (..), _OldestFirst)
-import           Pos.Util.Util (HasLens (..))
+import           Pos.Util.Util (HasLens (..), tempMeasure)
 import           Pos.Worker.Types (WorkerSpec, worker)
 
 retrievalWorker
@@ -90,7 +90,7 @@ retrievalWorkerImpl diffusion =
                 -- No tasks & the recovery header is set => do the recovery
                 (_, Just (nodeId, rHeader))  ->
                     pure (handleRecoveryWithHandler nodeId rHeader)
-        () <- thingToDoNext
+        tempMeasure "mainLoopGeneral" thingToDoNext
         mainLoop
     mainLoopE e = do
         -- REPORT:ERROR 'reportOrLogE' in block retrieval worker.
@@ -113,7 +113,7 @@ retrievalWorkerImpl diffusion =
             brtHeader
 
     -- When we have a continuation of the chain, just try to get and apply it.
-    handleContinues nodeId header = do
+    handleContinues nodeId header = tempMeasure "handleContinues" $ do
         let hHash = headerHash header
         logDebug $ "handleContinues: " <> pretty hHash
         classifyNewHeader header >>= \case
@@ -126,7 +126,7 @@ retrievalWorkerImpl diffusion =
     -- When we have an alternative header, we should check whether it's actually
     -- recovery mode (server side should send us headers as a proof) and then
     -- enter recovery mode.
-    handleAlternative nodeId header = do
+    handleAlternative nodeId header = tempMeasure "handleAlternative" $ do
         logDebug $ "handleAlternative: " <> pretty (headerHash header)
         classifyNewHeader header >>= \case
             CHInvalid _ ->
@@ -166,8 +166,9 @@ retrievalWorkerImpl diffusion =
             throwM $ DialogUnexpected $ "handleRecovery: recovery header is " <>
                                         "already present in db"
         logDebug "handleRecovery: fetching blocks"
-        checkpoints <- toList <$> getHeadersOlderExp Nothing
-        void $ getProcessBlocks diffusion nodeId rHeader checkpoints
+        checkpoints <- tempMeasure "getCheckpoints" $ toList <$> getHeadersOlderExp Nothing
+        tempMeasure "getProcessBlocks.total" $
+            void $ getProcessBlocks diffusion nodeId rHeader checkpoints
 
 ----------------------------------------------------------------------------
 -- Entering and exiting recovery mode
@@ -280,7 +281,9 @@ getProcessBlocks
     -> [HeaderHash]
     -> m ()
 getProcessBlocks diffusion nodeId desired checkpoints = do
-    result <- Diffusion.getBlocks diffusion nodeId desired checkpoints
+    result <-
+        tempMeasure "diffusion.getBlocks" $
+        Diffusion.getBlocks diffusion nodeId desired checkpoints
     case OldestFirst <$> nonEmpty (getOldestFirst result) of
       Nothing -> do
           let msg = sformat ("getProcessBlocks: diffusion returned []"%
@@ -292,7 +295,8 @@ getProcessBlocks diffusion nodeId desired checkpoints = do
           logDebug $ sformat
               ("Retrieved "%int%" blocks")
               (blocks ^. _OldestFirst . to NE.length)
-          handleBlocks nodeId blocks diffusion 
+          tempMeasure "handleBlocks.total" $
+              handleBlocks nodeId blocks diffusion
           -- If we've downloaded any block with bigger
           -- difficulty than ncRecoveryHeader, we're
           -- gracefully exiting recovery mode.
