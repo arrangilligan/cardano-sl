@@ -189,7 +189,6 @@ extra-deps:
 - unliftio-core-0.1.1.0
 - http-conduit-2.3.0
 - simple-sendfile-0.2.27
-- system-time-monotonic-0.2
 
 # This is for CI to pass --fast to all dependencies
 apply-ghc-options: everything
